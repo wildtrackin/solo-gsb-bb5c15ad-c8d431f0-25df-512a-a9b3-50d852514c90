@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>折页阅读顺序校样</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>折页阅读顺序校样 <small>Fold Reading-Order Proofing</small></h1>
+    <div class="plan-name">
+      <input id="planName" type="text" value="未命名方案" maxlength="40" />
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 左：方案 / 网格 / 折叠控制 -->
+    <aside class="panel" id="leftPanel">
+      <section class="card">
+        <h2>1. 行列纸格</h2>
+        <div class="row">
+          <label>行数
+            <input id="rowsInput" type="number" min="1" max="12" value="2" />
+          </label>
+          <label>列数
+            <input id="colsInput" type="number" min="1" max="12" value="2" />
+          </label>
+          <button id="createGridBtn" class="primary">创建网格</button>
+        </div>
+        <p class="hint">点击画布中的纸格可编辑每片叶子的<b>正/反面页码</b>（留空为空白页）。</p>
+      </section>
+
+      <section class="card">
+        <h2>2. 添加折叠步骤</h2>
+        <div class="row">
+          <label>折线
+            <select id="axisSelect">
+              <option value="v">竖直线（左右折）</option>
+              <option value="h">水平线（上下折）</option>
+            </select>
+          </label>
+          <label>位置
+            <select id="lineSelect"></select>
+          </label>
+        </div>
+        <div class="row fold-btns">
+          <button data-dir="l" class="fold">◀ 向左折</button>
+          <button data-dir="r" class="fold">向右折 ▶</button>
+          <button data-dir="u" class="fold">▲ 向上折</button>
+          <button data-dir="d" class="fold">▼ 向下折</button>
+        </div>
+        <p class="hint">也可直接点击画布边缘的箭头。非法折线显示为红色虚线，点击会标出冲突纸格。
+          “向左折”指右侧纸瓣向左翻过折线，其余类推。</p>
+        <div id="foldError" class="error-box" hidden></div>
+      </section>
+
+      <section class="card">
+        <h2>3. 方案存取</h2>
+        <div class="row wrap">
+          <button id="saveBtn" class="primary">保存到服务器</button>
+          <button id="exportBtn">导出 JSON</button>
+          <button id="importBtn">导入 JSON</button>
+          <input id="importFile" type="file" accept="application/json,.json" hidden />
+        </div>
+        <div class="row">
+          <button id="loadListBtn">已存方案…</button>
+          <button id="deletePlanBtn" class="danger" hidden>删除当前存档</button>
+        </div>
+        <ul id="planList" class="plan-list" hidden></ul>
+        <div id="saveMsg" class="hint"></div>
+      </section>
+    </aside>
+
+    <!-- 中：画布 -->
+    <section class="panel canvas-panel">
+      <div class="canvas-toolbar">
+        <div class="replay">
+          <button id="firstBtn" title="回到初始">⏮</button>
+          <button id="prevBtn" title="上一步">◀</button>
+          <button id="playBtn" title="播放">▶</button>
+          <button id="nextBtn" title="下一步">▶|</button>
+          <input id="stepSlider" type="range" min="0" max="0" value="0" />
+          <span id="stepLabel" class="step-label">第 0 / 0 步</span>
+        </div>
+        <div class="legend">
+          <span><i class="swatch paper"></i>纸格/叠层</span>
+          <span><i class="swatch move"></i>移动纸瓣</span>
+          <span><i class="swatch conflict"></i>冲突纸格</span>
+          <span id="statusBadge" class="badge"></span>
+        </div>
+      </div>
+      <div class="canvas-scroll">
+        <canvas id="board" width="900" height="640"></canvas>
+      </div>
+      <p class="hint canvas-hint" id="canvasHint">先在左侧创建行列纸格。</p>
+    </section>
+
+    <!-- 右：步骤与阅读顺序 -->
+    <aside class="panel" id="rightPanel">
+      <section class="card">
+        <h2>折叠步骤</h2>
+        <ol id="stepList" class="step-list"><li class="muted">尚无步骤</li></ol>
+        <div class="row">
+          <button id="delStepBtn" disabled>删除当前步之后</button>
+          <button id="clearStepsBtn" disabled>清空步骤</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>页码朝向</h2>
+        <div id="orientInfo" class="hint">在画布里，倒排页码会旋转 180° 显示，并标注 <span class="inv">⟲倒</span>。</div>
+      </section>
+
+      <section class="card">
+        <h2>最终阅读顺序（封面 → 封底）</h2>
+        <div id="sequenceBox" class="sequence">
+          <span class="muted">完成折叠后在此输出页码序列。</span>
+        </div>
+        <div id="foldState" class="hint"></div>
+      </section>
+
+      <section class="card" id="imposeCard">
+        <h2>自动拼版</h2>
+        <p class="hint">全部折叠合法并收成单叠后，按封面→封底槽位连续填页码，
+          反向写入每个原始纸格的正/反面。预览不会改动当前标注。</p>
+        <div class="row">
+          <label>起始页码
+            <input id="imposeStart" type="number" min="1" step="1" value="1" />
+          </label>
+          <label>成品页数
+            <input id="imposeCount" type="number" min="1" step="1" value="1" />
+          </label>
+          <button id="imposePreviewBtn" class="primary" disabled>生成预览</button>
+        </div>
+        <div id="imposeStatus" class="hint"></div>
+
+        <div id="imposePreview" class="impose-preview" hidden>
+          <div id="imposeSummary" class="impose-summary"></div>
+          <div id="imposeOverwrite" class="impose-overwrite" hidden></div>
+          <div class="impose-table-wrap">
+            <table class="impose-table">
+              <thead>
+                <tr><th>槽位</th><th>页码</th><th>原始纸格 · 面</th><th>朝向</th></tr>
+              </thead>
+              <tbody id="imposeRows"></tbody>
+            </table>
+          </div>
+          <div class="row right">
+            <button id="imposeCancelBtn">取消</button>
+            <button id="imposeConfirmBtn" class="primary">确认写入</button>
+          </div>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <!-- 纸格页码编辑弹层 -->
+  <div id="cellEditor" class="modal" hidden>
+    <div class="modal-body">
+      <h3>编辑面片页码 <small id="editorOrigin"></small></h3>
+      <div id="editorRows"></div>
+      <div class="row right">
+        <button id="editorCancel">取消</button>
+        <button id="editorOk" class="primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="foldEngine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
