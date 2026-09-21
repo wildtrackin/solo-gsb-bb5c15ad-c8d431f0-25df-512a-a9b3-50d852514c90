@@ -132,3 +132,95 @@ test('自动拼版标签经保存/载入往返后完整保留', async () => {
   assert.deepEqual(loaded.labels, imp.json.labels);
   assert.deepEqual(loaded.labels['0,0'], { front: '4', back: '1' });
 });
+
+// ---------- 折手自动寻路 ----------
+test('POST /api/find-path：2×2 反面封面返回等长最短方案（≤3 条）', async () => {
+  const r = await post('/api/find-path', {
+    rows: 2, cols: 2, labels: {}, steps: [],
+    target: { cell: '1,0', face: 'back' }
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.solved, true);
+  assert.equal(r.json.depth, 2);
+  assert.ok(r.json.solutions.length >= 2 && r.json.solutions.length <= 3);
+  for (const sol of r.json.solutions) {
+    assert.equal(sol.steps.length, 2);
+    assert.equal(sol.topPanel, '1,0');
+    assert.equal(sol.coverFace, 'back');
+  }
+});
+
+test('POST /api/find-path：无解返回 solved:false / no_solution', async () => {
+  const r = await post('/api/find-path', {
+    rows: 2, cols: 2, labels: {}, steps: [],
+    target: { cell: '0,0', face: 'front' }
+  });
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.solved, false);
+  assert.equal(r.json.reason, 'no_solution');
+  assert.ok(r.json.message.includes('无解'));
+});
+
+test('POST /api/find-path：非法方案返回 400；超过 4×4 返回 grid_too_large', async () => {
+  const bad = await post('/api/find-path', {
+    rows: 2, cols: 2, steps: [{ axis: 'z' }],
+    target: { cell: '0,0', face: 'front' }
+  });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.json.error.code, 'bad_plan');
+
+  const big = await post('/api/find-path', {
+    rows: 3, cols: 5, labels: {}, steps: [],
+    target: { cell: '0,0', face: 'back' }
+  });
+  assert.equal(big.status, 200);
+  assert.equal(big.json.ok, false);
+  assert.equal(big.json.error.code, 'grid_too_large');
+});
+
+test('POST /api/find-path：前缀非法折叠返回 bad_prefix 与步号', async () => {
+  const r = await post('/api/find-path', {
+    rows: 1, cols: 3, labels: {},
+    steps: [
+      { axis: 'v', line: 1, dir: 'r' },
+      { axis: 'v', line: 2, dir: 'l' }
+    ],
+    target: { cell: '0,0', face: 'back' }
+  });
+  assert.equal(r.json.ok, false);
+  assert.equal(r.json.error.code, 'bad_prefix');
+  assert.equal(r.json.error.stepIndex, 1);
+});
+
+test('POST /api/find-path：服务端把时间预算钳制到 2 秒以内，超限返回 limit_exceeded', async () => {
+  const r = await post('/api/find-path', {
+    rows: 4, cols: 4, labels: {}, steps: [],
+    target: { cell: '0,0', face: 'front' },
+    options: { timeoutMs: 1, maxDepth: 8 }
+  });
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.solved, false);
+  assert.equal(r.json.reason, 'limit_exceeded');
+
+  // 超出上限的 5000ms 会被钳制为 2000（4×4 空间在 2 秒内可穷尽 → no_solution）
+  const r2 = await post('/api/find-path', {
+    rows: 4, cols: 4, labels: {}, steps: [],
+    target: { cell: '0,0', face: 'front' },
+    options: { timeoutMs: 5000 }
+  });
+  assert.equal(r2.json.reason, 'no_solution');
+});
+
+test('POST /api/find-path：返回方案追加后经 /api/simulate 回放为目标单叠', async () => {
+  const found = await post('/api/find-path', {
+    rows: 1, cols: 2, labels: {}, steps: [],
+    target: { cell: '0,0', face: 'back' }
+  });
+  const steps = found.json.solutions[0].steps;
+  const sim = await post('/api/simulate', { rows: 1, cols: 2, labels: {}, steps });
+  assert.equal(sim.json.ok, true);
+  assert.equal(sim.json.folded, true);
+  assert.equal(sim.json.occupied[0].panels[0].ox, 0);
+  assert.ok(sim.json.occupied[0].panels[0].frame.n.z < 0);
+});

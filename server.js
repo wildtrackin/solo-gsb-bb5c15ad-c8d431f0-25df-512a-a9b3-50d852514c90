@@ -91,6 +91,39 @@ app.post('/api/impose', (req, res) => {
   }
 });
 
+// ---------- 折手自动寻路 ----------
+app.post('/api/find-path', (req, res) => {
+  try {
+    const plan = E.normalizePlan(req.body || {});
+    const optsRaw = req.body && req.body.options && typeof req.body.options === 'object'
+      ? req.body.options : {};
+    const result = E.findFoldPath(
+      plan.rows, plan.cols, plan.labels, plan.steps,
+      req.body && req.body.target,
+      {
+        // 服务端硬性兜底：最多 8 步、2 秒
+        maxDepth: Math.min(8, Math.max(0, Number(optsRaw.maxDepth) || 8)),
+        timeoutMs: Math.min(2000, Math.max(1, Number(optsRaw.timeoutMs) || 2000))
+      }
+    );
+    if (!result.ok) {
+      return res.json({
+        ok: false,
+        error: {
+          code: result.code,
+          message: result.message,
+          rows: result.rows, cols: result.cols,
+          stepIndex: result.stepIndex,
+          conflicts: result.conflicts
+        }
+      });
+    }
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ ok: false, error: { code: 'bad_plan', message: e.message } });
+  }
+});
+
 // ---------- 方案持久化 ----------
 function planFile(id) { return path.join(DATA_DIR, `${id}.json`); }
 

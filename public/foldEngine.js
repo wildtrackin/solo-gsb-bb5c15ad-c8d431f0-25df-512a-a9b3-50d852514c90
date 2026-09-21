@@ -450,6 +450,224 @@ function impositionOverwrite(labels, result) {
   return out;
 }
 
+/**
+ * 折手自动寻路
+ * ------------
+ * 从给定方案“全部步骤合法回放后的末态”出发，枚举当前引擎允许的折叠
+ * （validateFold 判为合法的折线 + 方向），BFS 搜索“收成单叠、且指定原始
+ * 纸格的指定面（正面/反面）位于该叠最上方作为封面”的最短后续折法。
+ *
+ * 限制（超出即返回对应错误码，不执行搜索）：
+ *   - 仅支持不超过 4×4 的网格；
+ *   - 后续步骤上限 maxDepth（默认 8）；
+ *   - 墙上时间上限 timeoutMs（默认 2000ms）。
+ *
+ * 状态键 stateKey 完整包含：
+ *   - 各格位（相对位置）；
+ *   - 每格叠层内面片自上而下的顺序；
+ *   - 每个面片的朝向标架（x/y/n）。
+ * 因此“面片排布相同但最终朝向/层序不同”的状态不会被误合并。
+ */
+
+/** 折叠方向的中文描述（界面与逐步折法展示共用）。 */
+function describeStep(st) {
+  const dirText = { l: '◀ 向左折', r: '▶ 向右折', u: '▲ 向上折', d: '▼ 向下折' };
+  const pos = st.axis === 'v' ? `竖线 ${st.line}` : `横线 ${st.line}`;
+  return `${pos}，${dirText[st.dir] || st.dir}`;
+}
+
+/** 枚举一个网格内全部候选折叠（合法性再由 validateFold 过滤）。 */
+function candidateSteps(rows, cols) {
+  const out = [];
+  for (let k = 1; k < cols; k++) {
+    out.push({ axis: 'v', line: k, dir: 'r' });   // 左瓣向右落
+    out.push({ axis: 'v', line: k, dir: 'l' });   // 右瓣向左落
+  }
+  for (let k = 1; k < rows; k++) {
+    out.push({ axis: 'h', line: k, dir: 'd' });   // 上瓣向下落
+    out.push({ axis: 'h', line: k, dir: 'u' });   // 下瓣向上落
+  }
+  return out;
+}
+
+function frameKey(f) {
+  // 各分量只可能是 -1/0/1，逐分量拼接即可完整刻画朝向
+  return [f.x.x, f.x.y, f.x.z, f.y.x, f.y.y, f.y.z, f.n.x, f.n.y, f.n.z].join(',');
+}
+
+/**
+ * 完整状态键：格位相对位置 + 叠层顺序 + 面片朝向。
+ * 面板按原始格 id 排序后拼接，保证同一物理状态键唯一。
+ */
+function stateKey(state) {
+  const cells = Object.keys(state.stacks).sort();
+  return cells.map((cell) => {
+    const ids = state.stacks[cell];
+    return `${cell}|${ids.map((id) => `${id}@${frameKey(state.panels[id].frame)}`).join('>')}`;
+  }).join(';');
+}
+
+/** 目标判定：已收成单叠，且叠顶面片是目标原始纸格、其朝上的面为目标面。 */
+function matchCoverGoal(state, targetId, targetFace) {
+  const cells = Object.keys(state.stacks);
+  if (cells.length !== 1) return false;
+  const ids = state.stacks[cells[0]];
+  const top = state.panels[ids[0]];
+  if (top.ox + ',' + top.oy !== targetId) return false;
+  const face = top.frame.n.z > 0 ? 'front' : 'back';
+  return face === targetFace;
+}
+
+function failSearch(code, message, extra) {
+  return Object.assign({ ok: false, code, message }, extra || {});
+}
+
+/** 方案步骤的可复现排序串（同一最短层内多方案按它取前 3）。 */
+function pathCanonical(steps) {
+  return steps.map((s) => `${s.axis}:${String(s.line).padStart(3, '0')}:${s.dir}`).join('/');
+}
+
+/**
+ * BFS 最短折法搜索。
+ * @param target { cell:'x,y'(原始纸格), face:'front'|'back' }
+ * @param options { maxDepth?:number≤8, timeoutMs?:number≤2000 }
+ * @returns 成功
+ *   { ok:true, solved:true, depth, solutions:[{steps, finalCell, topPanel, coverFace}],
+ *     searched:{states, frontier} }
+ *   无解（限步内可达状态穷尽）
+ *   { ok:true, solved:false, reason:'no_solution', searched, maxDepth, message }
+ *   超限（达到时间上限仍未穷尽/命中）
+ *   { ok:true, solved:false, reason:'limit_exceeded', searched, depth, timeoutMs, message }
+ *   其它前置错误 { ok:false, code:'bad_prefix'|'bad_target'|'grid_too_large'|'bad_limit', ... }
+ */
+function findFoldPath(rows, cols, labels, steps, target, options) {
+  rows = Number(rows); cols = Number(cols);
+  if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(cols) || cols < 1) {
+    return failSearch('bad_grid', '尚未创建合法的行列纸格（行数、列数都须为正整数）。');
+  }
+  if (rows > 4 || cols > 4) {
+    return failSearch('grid_too_large',
+      `折手自动寻路仅支持不超过 4×4 的网格（当前为 ${rows}×${cols}）。`,
+      { rows, cols, maxGrid: 4 });
+  }
+  const maxDepth = options && options.maxDepth != null ? Number(options.maxDepth) : 8;
+  const timeoutMs = options && options.timeoutMs != null ? Number(options.timeoutMs) : 2000;
+  if (!Number.isInteger(maxDepth) || maxDepth < 0 || maxDepth > 8) {
+    return failSearch('bad_limit', '后续步骤上限须为 0..8 的整数。');
+  }
+  if (!(timeoutMs > 0 && timeoutMs <= 2000)) {
+    return failSearch('bad_limit', '搜索时间上限须为不超过 2000 毫秒的正数。');
+  }
+
+  const r = replay(rows, cols, labels || {}, Array.isArray(steps) ? steps : []);
+  if (r.error) {
+    return failSearch('bad_prefix',
+      `当前方案存在非法折叠（第 ${r.error.stepIndex + 1} 步：${r.error.message}），请先修正后再寻路。`,
+      { stepIndex: r.error.stepIndex, conflicts: r.error.conflicts });
+  }
+
+  target = target || {};
+  const m = /^(\d+),(\d+)$/.exec(String(target.cell));
+  if (!m) return failSearch('bad_target', '请选择一个原始纸格作为封面所在格。');
+  const tx = Number(m[1]), ty = Number(m[2]);
+  if (tx < 0 || tx >= cols || ty < 0 || ty >= rows) {
+    return failSearch('bad_target', `封面原格 (${target.cell}) 不在 ${cols}×${rows} 网格内。`);
+  }
+  if (target.face !== 'front' && target.face !== 'back') {
+    return failSearch('bad_target', "封面朝向须为 'front'（正面）或 'back'（反面）。");
+  }
+  const targetId = `${tx},${ty}`;
+
+  const start = r.state;
+  const deadline = Date.now() + timeoutMs;
+  const goals = [];
+  const seen = new Set([stateKey(start)]);
+  let frontier = [{ state: start, steps: [] }];
+  let expanded = 0;
+  let timedOut = false;
+
+  const makeSolution = (node) => {
+    const cell = Object.keys(node.state.stacks)[0];
+    const topId = node.state.stacks[cell][0];
+    const panel = node.state.panels[topId];
+    return {
+      steps: node.steps.map((s) => ({ ...s })),
+      finalCell: cell,
+      topPanel: panel.ox + ',' + panel.oy,
+      coverFace: panel.frame.n.z > 0 ? 'front' : 'back'
+    };
+  };
+
+  // 起点即目标：0 步方案
+  if (matchCoverGoal(start, targetId, target.face)) {
+    const node0 = { state: start, steps: [] };
+    return {
+      ok: true, solved: true, depth: 0,
+      solutions: [makeSolution(node0)],
+      searched: { states: seen.size, frontier: 0 }
+    };
+  }
+
+  for (let depth = 0; depth < maxDepth; depth++) {
+    const nextLevel = [];
+    let hitDeadline = false;
+    for (const node of frontier) {
+      expanded++;
+      if ((expanded & 63) === 0 && Date.now() > deadline) { hitDeadline = true; break; }
+
+      const st = node.state;
+      const occupiedCount = Object.keys(st.stacks).length;
+      // 合法折叠每次最多把占用格位数减半（移动格与静止格一一配对），
+      // 剩余步数不足以把 k 个叠层收成 1 个时整枝剪去。
+      if (Math.ceil(Math.log2(occupiedCount)) > maxDepth - depth) continue;
+
+      for (const step of candidateSteps(st.rows, st.cols)) {
+        if (validateFold(st, step)) continue;
+        const ns = applyFold(st, step);
+        const k = stateKey(ns);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        const child = { state: ns, steps: node.steps.concat([step]) };
+        if (matchCoverGoal(ns, targetId, target.face)) {
+          goals.push(makeSolution(child));
+          if (goals.length >= 3) break;
+        } else if (Object.keys(ns.stacks).length > 1) {
+          // 单叠但封面不符即死局（不可能再有合法折），不入下一层
+          nextLevel.push(child);
+        }
+      }
+      if (goals.length >= 3) break;
+    }
+
+    if (goals.length) {
+      goals.sort((a, b) => pathCanonical(a.steps) < pathCanonical(b.steps) ? -1 : 1);
+      return {
+        ok: true, solved: true, depth: depth + 1,
+        solutions: goals.slice(0, 3),
+        searched: { states: seen.size, frontier: frontier.length }
+      };
+    }
+    if (hitDeadline) { timedOut = true; break; }
+    frontier = nextLevel;
+    if (!frontier.length) break;
+  }
+
+  if (timedOut) {
+    return {
+      ok: true, solved: false, reason: 'limit_exceeded',
+      depth: undefined, timeoutMs,
+      searched: { states: seen.size, expanded, frontier: frontier.length },
+      message: `搜索超过 ${timeoutMs / 1000} 秒上限（已枚举 ${seen.size} 个状态），未能确认是否存在目标折法。`
+    };
+  }
+  return {
+    ok: true, solved: false, reason: 'no_solution',
+    maxDepth,
+    searched: { states: seen.size, expanded },
+    message: `在 ${maxDepth} 个后续步骤内没有能收成目标单叠的合法折法（无解）。`
+  };
+}
+
 /** 方案校验/规整（载入 JSON 时使用） */
 function normalizePlan(plan) {
   const errors = [];
@@ -498,7 +716,8 @@ function normalizePlan(plan) {
 const api = {
   initialState, cloneState, validateFold, applyFold,
   replay, visibleFace, pageSequence, normalizePlan, key,
-  impositionEligibility, autoImpose, impositionOverwrite
+  impositionEligibility, autoImpose, impositionOverwrite,
+  findFoldPath, candidateSteps, stateKey, describeStep
 };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = api;

@@ -62,7 +62,22 @@ docker compose down
    - “生成预览”**不会改动当前标注**；确认后才批量写入；若现有标注非空，
      确认前会汇总所有将被覆盖/清空的位置（写入前还会二次确认）；
    - 非法折叠、未收成单叠或页数超出容量时，生成按钮禁用并给出具体原因。
-7. **保存 / 载入**：
+7. **折手自动寻路**：右侧“折手自动寻路”卡片中，指定某个**原始纸格**的
+   **正面或反面**作为最终朝上的封面，点击“搜索最短折法”：
+   - 搜索从**当前方案全部步骤合法回放后的末态**出发（与回放停在第几步无关），
+     枚举引擎当前允许的折线与方向，按 BFS 求“收成单叠且封面符合指定”的
+     **最短**后续步骤；
+   - 命中后最多展示 **3 条等长最短方案**，逐条列出每一步的折线与方向；
+     点击某方案的“**追加到当前步骤并回放**”，即把该方案的步骤追加到当前方案末尾，
+     并进入既有回放（自动定位到末态），随后可继续编辑、保存或自动拼版；
+   - 状态键完整包含各格**叠层顺序、面片朝向与相对位置**，不会把终态不同的
+     状态误合并；
+   - **仅支持不超过 4×4 的网格**，搜索以**最多 8 个后续步骤、2 秒**为上限：
+     限步内可达状态全部穷尽仍未命中时提示“**无解**”；
+     达到时间上限仍未确认时提示“**搜索超限**”；
+   - 当前方案含非法折叠、或网格超过 4×4 时，搜索按钮禁用并给出原因；
+     搜索本身不改动当前步骤，只有手动“追加”才会写入。
+8. **保存 / 载入**：
    - “保存到服务器”将方案 JSON 存入容器数据卷，可通过“已存方案…”再次载入；
    - “导出 JSON / 导入 JSON”在本地文件与应用之间交换方案。
 
@@ -105,7 +120,7 @@ docker compose down
 ## 目录结构
 
 ```
-server.js              Express 服务：静态托管 + /api/simulate + 方案持久化
+server.js              Express 服务：静态托管 + /api/simulate + /api/impose + /api/find-path + 方案持久化
 entrypoint.sh          容器启动入口（依赖自检/安装、初始化、启动）
 public/
   index.html           页面结构
@@ -114,15 +129,17 @@ public/
   app.js               Canvas 渲染、交互、回放、存取
 tests/engine.test.js   引擎单元测试（node --test）
 tests/imposition.test.js 自动拼版单元测试
-tests/api.test.js      /api/impose、/api/simulate 与方案存取的 HTTP 测试
-tests/ui-smoke.js      前端主流程冒烟（DOM 桩中加载 app.js）
+tests/pathfind.test.js 折手自动寻路（BFS、状态键、无解/超限）单元测试
+tests/api.test.js      /api/impose、/api/find-path、/api/simulate 与方案存取的 HTTP 测试
+tests/ui-smoke.js      前端主流程冒烟（DOM 桩中加载 app.js，直接 `node tests/ui-smoke.js` 运行）
 Dockerfile, docker-compose.yml
 ```
 
 ## 运行测试
 
 ```bash
-npm test
+npm test                 # node --test：引擎 / 拼版 / 寻路 / HTTP 测试
+node tests/ui-smoke.js   # 前端主流程冒烟（DOM 桩，独立运行）
 ```
 
 服务端另有 `POST /api/simulate`（body 同方案 JSON，可用 `upto` 指定回放步数）返回
@@ -135,3 +152,22 @@ npm test
 前置条件不满足时返回 `ok:false` 与具体错误码
 （`contour` / `thickness` / `not_single_stack` / `too_many_pages` / `bad_start` / `bad_count`）。
 自动生成的标签就是普通 `labels`，保存、导入导出与 `/api/simulate` 回放均原样保留。
+
+`POST /api/find-path` 在方案 JSON 之外附加：
+
+```json
+{
+  "target": { "cell": "1,0", "face": "back" },
+  "options": { "maxDepth": 8, "timeoutMs": 2000 }
+}
+```
+
+从方案全部步骤合法回放的末态出发，BFS 搜索收成单叠、且原始纸格 `cell`
+（`列,行`）的 `face`（`front` / `back`）朝上为封面的最短后续折法。
+命中时返回 `solved:true`、`depth` 与最多 3 条 `solutions`
+（每条含 `steps`、收成格 `finalCell`、封面原格 `topPanel`、封面面别 `coverFace`）；
+限步穷尽未命中返回 `solved:false, reason:"no_solution"`；
+超过 `timeoutMs`（服务端硬性钳制为 ≤2000ms）返回 `reason:"limit_exceeded"`。
+网格超过 4×4、前缀含非法折叠等前置问题返回 `ok:false`，错误码
+`grid_too_large` / `bad_prefix` / `bad_target` / `bad_limit` / `bad_grid`。
+返回的 `steps` 可直接追加到方案 `steps` 后交由 `/api/simulate` 回放验证。

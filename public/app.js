@@ -16,7 +16,8 @@ const app = {
   hoverHandle: null,
   editingCell: null,
   playTimer: null,
-  imposition: { eligible: null, result: null, sig: null }   // 自动拼版状态
+  imposition: { eligible: null, result: null, sig: null },  // 自动拼版状态
+  pathfind: { result: null, sig: null, gridKey: null }       // 折手自动寻路状态
 };
 
 const $ = (id) => document.getElementById(id);
@@ -58,6 +59,8 @@ function init() {
   $('imposeCancelBtn').addEventListener('click', closeImposition);
   $('imposeStart').addEventListener('input', renderImposition);
   $('imposeCount').addEventListener('input', renderImposition);
+
+  $('pathSearchBtn').addEventListener('click', runPathfind);
 
   canvas.addEventListener('click', onCanvasClick);
   canvas.addEventListener('mousemove', onCanvasMove);
@@ -146,6 +149,8 @@ function flashConflict(err) {
   draw();
   renderControls();
   renderSteps();
+  renderImposition();
+  renderPathfind();
 }
 
 function truncateSteps() {
@@ -191,6 +196,7 @@ function render() {
   renderSequence();
   renderControls();
   renderImposition();
+  renderPathfind();
 }
 
 function renderControls() {
@@ -761,6 +767,194 @@ function confirmImposition() {
     `已按自动拼版写入 ${result.pageCount} 个页码（${result.blankTrailing} 个尾部槽位留空），记得保存方案。`;
 }
 
+// ---------- 折手自动寻路 ----------
+/**
+ * 寻路基于“方案全部步骤回放”的末态；只要方案几何（网格/标注/步骤）变化，
+ * 旧结果即作废。寻路起点与回放到第几步（upto）无关。
+ */
+function pathfindSignature() {
+  return JSON.stringify({
+    r: app.plan.rows, c: app.plan.cols,
+    l: app.plan.labels, s: app.plan.steps
+  });
+}
+
+/** 重建“封面原格”下拉（仅在网格尺寸变化时重建，保留用户选择）。 */
+function refreshPathCells() {
+  const key = `${app.plan.rows}x${app.plan.cols}`;
+  if (app.pathfind.gridKey === key) return;
+  app.pathfind.gridKey = key;
+  const sel = $('pathCell');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  if (!app.plan.rows) {
+    const o = document.createElement('option');
+    o.value = '';
+    o.textContent = '（先创建网格）';
+    sel.appendChild(o);
+    return;
+  }
+  for (let y = 0; y < app.plan.rows; y++) {
+    for (let x = 0; x < app.plan.cols; x++) {
+      const id = `${x},${y}`;
+      const lab = app.plan.labels[id] || {};
+      const f = lab.front || '', b = lab.back || '';
+      const o = document.createElement('option');
+      o.value = id;
+      o.textContent = `原格(${id})` + (f || b ? `  正:${f || '空'} / 反:${b || '空'}` : '');
+      sel.appendChild(o);
+    }
+  }
+  if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+}
+
+function renderPathfind() {
+  refreshPathCells();
+  const btn = $('pathSearchBtn');
+  const status = $('pathStatus');
+  if (!app.plan.rows) {
+    btn.disabled = true;
+    status.className = 'hint';
+    status.textContent = '先在左侧创建行列纸格。';
+    $('pathResults').hidden = true;
+    app.pathfind.result = null;
+    return;
+  }
+  if (app.plan.rows > 4 || app.plan.cols > 4) {
+    btn.disabled = true;
+    status.className = 'hint path-status-err';
+    status.textContent = `自动寻路仅支持不超过 4×4 的网格（当前为 ${app.plan.rows}×${app.plan.cols}）。`;
+    $('pathResults').hidden = true;
+    app.pathfind.result = null;
+    return;
+  }
+  // 末态合法性：当前方案全部步骤必须可回放
+  const full = E.replay(app.plan.rows, app.plan.cols, app.plan.labels, app.plan.steps);
+  if (full.error) {
+    btn.disabled = true;
+    status.className = 'hint path-status-err';
+    status.textContent = `当前方案第 ${full.error.stepIndex + 1} 步非法（${
+      full.error.code === 'thickness' ? '厚度不一致' : '折线不在外轮廓'}），请先修正后再寻路。`;
+    $('pathResults').hidden = true;
+    app.pathfind.result = null;
+    return;
+  }
+  btn.disabled = false;
+  if (!app.pathfind.result) {
+    status.className = 'hint';
+    status.textContent = '从当前方案全部步骤的末态开始搜索；搜索不会改动当前步骤。';
+    $('pathResults').hidden = true;
+  } else if (app.pathfind.sig !== pathfindSignature() || app.pathfind.target !== `${$('pathCell').value}|${$('pathFace').value}`) {
+    // 方案或目标变化后旧结果作废
+    app.pathfind.result = null;
+    renderPathfind();
+    return;
+  } else {
+    renderPathResults(app.pathfind.result);
+  }
+}
+
+/** 点击搜索：先显示“搜索中”，下一帧再执行同步 BFS（≤2s），避免界面无反馈。 */
+function runPathfind() {
+  if (!app.plan.rows || app.plan.rows > 4 || app.plan.cols > 4) return;
+  if (!$('pathCell').value) return;
+  const btn = $('pathSearchBtn');
+  btn.disabled = true;
+  $('pathStatus').className = 'hint';
+  $('pathStatus').textContent = '搜索中…（最多 8 步、2 秒）';
+  $('pathResults').hidden = true;
+  setTimeout(doPathfindSearch, 20);
+}
+
+function doPathfindSearch() {
+  const target = { cell: $('pathCell').value, face: $('pathFace').value };
+  const status = $('pathStatus');
+  let result;
+  try {
+    result = E.findFoldPath(
+      app.plan.rows, app.plan.cols, app.plan.labels, app.plan.steps,
+      target, { maxDepth: 8, timeoutMs: 2000 });
+  } catch (e) {
+    result = { ok: false, code: 'bad_prefix', message: e.message };
+  }
+  $('pathSearchBtn').disabled = false;
+  if (!result.ok) {
+    status.className = 'hint path-status-err';
+    status.textContent = '无法搜索：' + result.message;
+    app.pathfind.result = null;
+    $('pathResults').hidden = true;
+    return;
+  }
+  app.pathfind.result = result;
+  app.pathfind.sig = pathfindSignature();
+  app.pathfind.target = `${target.cell}|${target.face}`;
+  renderPathResults(result);
+}
+
+function renderPathResults(result) {
+  const status = $('pathStatus');
+  const box = $('pathResults');
+  box.innerHTML = '';
+  if (!result.solved) {
+    box.hidden = true;
+    status.className = 'hint path-status-err';
+    if (result.reason === 'no_solution') {
+      status.textContent = `无解：${result.message}`;
+    } else {
+      status.textContent = `搜索超限：${result.message}`;
+    }
+    return;
+  }
+  box.hidden = false;
+  status.className = 'hint path-status-ok';
+  const faceName = result.solutions[0].coverFace === 'front' ? '正面' : '反面';
+  status.textContent =
+    `找到 ${result.solutions.length} 条等长最短方案：各需 ${result.depth} 个后续步骤` +
+    `，封面 = 原格(${result.solutions[0].topPanel}) 的${faceName}朝上（共枚举 ${result.searched.states} 个状态）。`;
+
+  result.solutions.forEach((sol, i) => {
+    const card = document.createElement('div');
+    card.className = 'path-sol';
+    const head = document.createElement('div');
+    head.className = 'path-sol-head';
+    const title = document.createElement('b');
+    title.textContent = `方案 ${i + 1}（${sol.steps.length} 步）`;
+    const meta = document.createElement('span');
+    meta.className = 'muted';
+    meta.textContent = `收成于格(${sol.finalCell})`;
+    const addBtn = document.createElement('button');
+    addBtn.className = 'primary';
+    addBtn.textContent = '追加到当前步骤并回放';
+    addBtn.addEventListener('click', () => appendPathSolution(sol));
+    head.append(title, meta, addBtn);
+    card.appendChild(head);
+
+    const ol = document.createElement('ol');
+    ol.className = 'path-step-list';
+    sol.steps.forEach((st, j) => {
+      const li = document.createElement('li');
+      li.textContent = `第 ${app.plan.steps.length + j + 1} 步：${E.describeStep(st)}`;
+      ol.appendChild(li);
+    });
+    card.appendChild(ol);
+    box.appendChild(card);
+  });
+}
+
+/** 把任一搜索方案追加为后续步骤，进入既有回放流程（末态）。 */
+function appendPathSolution(sol) {
+  if (!app.pathfind.result || app.pathfind.sig !== pathfindSignature()) return;
+  for (const st of sol.steps) {
+    const base = E.replay(app.plan.rows, app.plan.cols, app.plan.labels, app.plan.steps).state;
+    if (E.validateFold(base, st)) return;   // 理论上不会发生（方案由合法路径给出）
+    app.plan.steps.push({ axis: st.axis, line: st.line, dir: st.dir });
+  }
+  app.pathfind.result = null;   // 末态已变，旧结果作废
+  clearFoldError();
+  setUpto(app.plan.steps.length, true);
+  $('saveMsg').textContent = '已把自动寻路方案追加到当前步骤，可继续编辑或保存。';
+}
+
 // ---------- 错误提示 ----------
 function showFoldError(err) {
   const box = $('foldError');
@@ -885,6 +1079,6 @@ if (typeof window !== 'undefined') {
   window.__foldApp = Object.assign(app, {
     requestStep, setUpto, createGrid, render, getFoldError: () => $('foldError'),
     previewImposition, confirmImposition, closeImposition, renderImposition,
-    readImposeInputs
+    readImposeInputs, runPathfind, doPathfindSearch, appendPathSolution, renderPathfind
   });
 }

@@ -120,6 +120,27 @@
         <div id="foldState" class="hint"></div>
       </section>
 
+      <section class="card" id="pathfindCard">
+        <h2>折手自动寻路</h2>
+        <p class="hint">指定某个<b>原始纸格</b>的正面或反面作为最终朝上的封面，从当前方案的
+          末态出发搜索收成单叠的<b>最短</b>后续折法。仅支持不超过 4×4 的网格，
+          最多 8 个后续步骤、2 秒搜索上限。</p>
+        <div class="row">
+          <label>封面原格
+            <select id="pathCell"></select>
+          </label>
+          <label>朝上的面
+            <select id="pathFace">
+              <option value="front">正面</option>
+              <option value="back">反面</option>
+            </select>
+          </label>
+          <button id="pathSearchBtn" class="primary">搜索最短折法</button>
+        </div>
+        <div id="pathStatus" class="hint"></div>
+        <div id="pathResults" class="path-results" hidden></div>
+      </section>
+
       <section class="card" id="imposeCard">
         <h2>自动拼版</h2>
         <p class="hint">全部折叠合法并收成单叠后，按封面→封底槽位连续填页码，

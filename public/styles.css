@@ -229,6 +229,18 @@ button.fold { flex: 1 1 40%; min-width: 110px; font-weight: 600; }
 .impose-status-err { color: var(--danger); }
 .impose-status-ok { color: var(--ok); }
 
+/* ---------- 折手自动寻路 ---------- */
+.path-status-err { color: var(--danger); }
+.path-status-ok { color: var(--ok); }
+.path-results { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.path-sol { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: #f8faff; }
+.path-sol-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.path-sol-head b { color: #102a5c; }
+.path-sol-head .muted { font-size: 12px; }
+.path-sol-head button { margin-left: auto; padding: 4px 10px; font-size: 12px; }
+.path-step-list { margin: 0; padding-left: 20px; font-size: 12px; line-height: 1.7; color: var(--ink); }
+.path-step-list li { font-variant-numeric: tabular-nums; }
+
 @media (max-width: 1100px) {
   .layout { grid-template-columns: 1fr; }
 }
