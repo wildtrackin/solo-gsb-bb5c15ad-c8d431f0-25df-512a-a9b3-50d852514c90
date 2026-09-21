@@ -132,3 +132,91 @@ test('自动拼版标签经保存/载入往返后完整保留', async () => {
   assert.deepEqual(loaded.labels, imp.json.labels);
   assert.deepEqual(loaded.labels['0,0'], { front: '4', back: '1' });
 });
+
+// ---------- 折手自动寻路 ----------
+test('POST /api/fold-path：2×2 返回 2 步最短方案，步骤可回放为目标单叠', async () => {
+  const r = await post('/api/fold-path', {
+    rows: 2, cols: 2, labels: {}, steps: [],
+    target: { cell: '1,0', face: 'back' }
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.status, 'solved');
+  assert.equal(r.json.length, 2);
+  assert.ok(r.json.schemes.length >= 1 && r.json.schemes.length <= 3);
+  for (const s of r.json.schemes) {
+    assert.equal(s.steps.length, 2);
+    assert.equal(s.cover.cell, '1,0');
+    assert.equal(s.cover.face, 'back');
+    const sim = await post('/api/simulate', {
+      rows: 2, cols: 2, labels: {}, steps: s.steps
+    });
+    assert.equal(sim.json.folded, true);
+  }
+});
+
+test('POST /api/fold-path：无解与搜索超限分别返回不同 status', async () => {
+  const none = await post('/api/fold-path', {
+    rows: 2, cols: 2, labels: {}, steps: [],
+    target: { cell: '0,0', face: 'front' }
+  });
+  assert.equal(none.json.ok, true);
+  assert.equal(none.json.status, 'no_solution');
+  assert.deepEqual(none.json.schemes, []);
+
+  const limited = await post('/api/fold-path', {
+    rows: 4, cols: 4, labels: {}, steps: [],
+    target: { cell: '3,2', face: 'back' }, timeLimitMs: 0
+  });
+  assert.equal(limited.json.ok, true);
+  assert.equal(limited.json.status, 'limit');
+});
+
+test('POST /api/fold-path：超过 4×4 / 目标越界 / 非法回放均返回具体错误', async () => {
+  let r = await post('/api/fold-path', {
+    rows: 5, cols: 4, labels: {}, steps: [],
+    target: { cell: '0,0', face: 'back' }
+  });
+  assert.equal(r.json.ok, false);
+  assert.equal(r.json.error.code, 'grid_too_large');
+
+  r = await post('/api/fold-path', {
+    rows: 2, cols: 2, labels: {}, steps: [],
+    target: { cell: '9,9', face: 'back' }
+  });
+  assert.equal(r.json.ok, false);
+  assert.equal(r.json.error.status, 'bad_target');
+
+  r = await post('/api/fold-path', {
+    rows: 1, cols: 3, labels: {},
+    steps: [
+      { axis: 'v', line: 1, dir: 'r' },
+      { axis: 'v', line: 2, dir: 'l' }
+    ],
+    target: { cell: '0,0', face: 'back' }
+  });
+  assert.equal(r.json.ok, false);
+  assert.equal(r.json.error.status, 'replay_conflict');
+  assert.equal(r.json.error.stepIndex, 1);
+});
+
+test('POST /api/fold-path：已是目标单叠返回 already 与 0 步', async () => {
+  const r = await post('/api/fold-path', {
+    rows: 1, cols: 2, labels: {},
+    steps: [{ axis: 'v', line: 1, dir: 'r' }],
+    target: { cell: '0,0', face: 'back' }
+  });
+  assert.equal(r.json.status, 'already');
+  assert.equal(r.json.length, 0);
+  assert.deepEqual(r.json.schemes[0].steps, []);
+});
+
+test('POST /api/fold-path：上限参数被夹紧（maxSteps=99 仍能返回结果）', async () => {
+  const r = await post('/api/fold-path', {
+    rows: 2, cols: 2, labels: {}, steps: [],
+    target: { cell: '0,0', face: 'back' }, maxSteps: 99, timeLimitMs: 99999
+  });
+  assert.equal(r.json.status, 'solved');
+  assert.equal(r.json.length, 2);
+  assert.ok(r.json.elapsedMs <= 2000);
+});

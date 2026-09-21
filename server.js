@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const E = require('./public/foldEngine.js');
+const FP = require('./public/foldPath.js');
 
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -85,6 +86,51 @@ app.post('/api/impose', (req, res) => {
       labels: result.labels,
       slots: result.slots,
       overwrites: E.impositionOverwrite(plan.labels, result)
+    });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: { code: 'bad_plan', message: e.message } });
+  }
+});
+
+// ---------- 折手自动寻路 ----------
+app.post('/api/fold-path', (req, res) => {
+  try {
+    const plan = E.normalizePlan(req.body || {});
+    const t = req.body && req.body.target;
+    const target = t ? { cell: t.cell, face: t.face } : null;
+    // 调用方可把上限调得更紧（如测试/交互预览），但永远不允许放宽 8 步 / 2 秒
+    const opts = {};
+    if (req.body && Number.isInteger(req.body.maxSteps)) opts.maxSteps = req.body.maxSteps;
+    if (req.body && Number.isFinite(Number(req.body.timeLimitMs))) {
+      opts.timeLimitMs = Number(req.body.timeLimitMs);
+    }
+    const r = FP.searchFoldPath(
+      plan.rows, plan.cols, plan.labels, plan.steps, target, opts);
+    if (!r.ok) {
+      return res.json({
+        ok: false,
+        error: {
+          status: r.status,
+          code: r.code || r.status,
+          message: r.message,
+          stepIndex: r.stepIndex,
+          conflicts: r.conflicts
+        }
+      });
+    }
+    res.json({
+      ok: true,
+      status: r.status,
+      target: r.target,
+      length: r.length,
+      depth: r.depth,
+      truncated: r.truncated,
+      goalCount: r.goalCount,
+      elapsedMs: r.elapsedMs,
+      visited: r.visited,
+      expanded: r.expanded,
+      schemes: r.schemes,
+      message: r.message || null
     });
   } catch (e) {
     res.status(400).json({ ok: false, error: { code: 'bad_plan', message: e.message } });

@@ -14,7 +14,7 @@ if [ ! -d /app/node_modules ]; then
 fi
 
 # 引擎自检（确保折叠逻辑模块可加载）
-node -e "require('./public/foldEngine.js'); console.log('[fold-proofing] 折叠引擎自检通过');"
+node -e "require('./public/foldEngine.js'); require('./public/foldPath.js'); console.log('[fold-proofing] 折叠引擎与寻路模块自检通过');"
 
 echo "[fold-proofing] 启动 Web 服务，端口 ${PORT:-3000} ..."
 exec node server.js

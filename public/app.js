@@ -16,7 +16,10 @@ const app = {
   hoverHandle: null,
   editingCell: null,
   playTimer: null,
-  imposition: { eligible: null, result: null, sig: null }   // 自动拼版状态
+  imposition: { eligible: null, result: null, sig: null },  // 自动拼版状态
+  pathResult: null,      // 最近一次折手自动寻路结果（方案改动后按签名作废）
+  pathSig: null,
+  pathCellsKey: ''       // 目标纸格下拉当前对应的网格
 };
 
 const $ = (id) => document.getElementById(id);
@@ -59,6 +62,8 @@ function init() {
   $('imposeStart').addEventListener('input', renderImposition);
   $('imposeCount').addEventListener('input', renderImposition);
 
+  $('pathSearchBtn').addEventListener('click', searchPath);
+
   canvas.addEventListener('click', onCanvasClick);
   canvas.addEventListener('mousemove', onCanvasMove);
   canvas.addEventListener('mouseleave', () => { app.hoverHandle = null; draw(); });
@@ -76,6 +81,7 @@ function createGrid() {
   app.loadedId = null;
   setUpto(0, true);
   refreshLineSelect();
+  refreshPathCells();
 }
 
 function clampInt(v, lo, hi, dflt) {
@@ -140,12 +146,15 @@ function requestStep(step) {
 }
 
 function flashConflict(err) {
-  // 冲突以“应用全部已添加步骤后”的状态为底图显示
+  // 冲突以“应用全部已添加步骤后”的状态为底图显示（被拒步骤不入列，
+  // 底图本身合法），随后照常刷新受方案状态驱动的面板
   const state = E.replay(app.plan.rows, app.plan.cols, app.plan.labels, app.plan.steps).state;
   app.replay = { state, error: err };
   draw();
   renderControls();
   renderSteps();
+  renderImposition();
+  renderPath();
 }
 
 function truncateSteps() {
@@ -191,6 +200,7 @@ function render() {
   renderSequence();
   renderControls();
   renderImposition();
+  renderPath();
 }
 
 function renderControls() {
@@ -761,6 +771,190 @@ function confirmImposition() {
     `已按自动拼版写入 ${result.pageCount} 个页码（${result.blankTrailing} 个尾部槽位留空），记得保存方案。`;
 }
 
+// ---------- 折手自动寻路 ----------
+const DIR_TEXT_PATH = { l: '◀ 向左折', r: '▶ 向右折', u: '▲ 向上折', d: '▼ 向下折' };
+
+/** 目标纸格下拉：列出当前网格所有原始格（列,行）。 */
+function refreshPathCells() {
+  const sel = $('pathCell');
+  if (!sel) return;
+  const { rows, cols } = app.plan;
+  const key = `${rows}x${cols}`;
+  if (app.pathCellsKey === key) return;
+  app.pathCellsKey = key;
+  const prev = sel.value;
+  sel.innerHTML = '';
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const o = document.createElement('option');
+      o.value = `${x},${y}`;
+      o.textContent = `格 (${x}, ${y})`;
+      sel.appendChild(o);
+    }
+  }
+  if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+}
+
+function pathEligibility() {
+  if (!app.plan.rows) {
+    return { ok: false, message: '先在左侧创建行列纸格。' };
+  }
+  if (app.plan.rows > 4 || app.plan.cols > 4) {
+    return { ok: false, message: `折手自动寻路仅支持不超过 4×4 的网格，当前为 ${app.plan.rows}×${app.plan.cols}。` };
+  }
+  // 寻路起点必须是“现有步骤已合法回放”的末态
+  const full = E.replay(app.plan.rows, app.plan.cols, app.plan.labels, app.plan.steps);
+  if (full.error) {
+    return { ok: false, message: `当前方案第 ${full.error.stepIndex + 1} 步为非法折叠，请先修正后再寻路。` };
+  }
+  return { ok: true, state: full.state };
+}
+
+function renderPath() {
+  refreshPathCells();
+  // 方案几何变化（网格/标注/步骤）后旧结果作废
+  if (app.pathResult && app.pathSig !== planSignature()) {
+    app.pathResult = null;
+    app.pathSig = null;
+    $('pathResults').hidden = true;
+  }
+  const elig = pathEligibility();
+  $('pathSearchBtn').disabled = !elig.ok;
+  const status = $('pathStatus');
+  if (!elig.ok) {
+    status.textContent = elig.message;
+    status.className = 'hint path-status-err';
+    $('pathResults').hidden = true;
+    app.pathResult = null;
+    app.pathSig = null;
+  } else if (!app.pathResult) {
+    const info = E.pageSequence(elig.state);
+    status.textContent = info.folded
+      ? '当前末态已收成单叠：可直接选择目标封面验证（0 步），或改选其他封面。'
+      : '当前末态可作为寻路起点：选择要朝上的原始纸格与正/反面后搜索。';
+    status.className = 'hint';
+  }
+  if (app.pathResult) renderPathResults(app.pathResult);
+}
+
+async function searchPath() {
+  const elig = pathEligibility();
+  if (!elig.ok) return;
+  const target = { cell: $('pathCell').value, face: $('pathFace').value };
+  const status = $('pathStatus');
+  status.textContent = '搜索中（上限 8 步 / 2 秒）…';
+  status.className = 'hint';
+  $('pathResults').hidden = true;
+
+  let data;
+  try {
+    const resp = await fetch('/api/fold-path', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...planPayload(), target })
+    });
+    data = await resp.json();
+  } catch (_) {
+    // 离线/服务不可用时直接复用浏览器端同一份引擎，行为与服务端一致
+    data = FoldPath.searchFoldPath(
+      app.plan.rows, app.plan.cols, app.plan.labels, app.plan.steps, target);
+  }
+
+  if (!data.ok) {
+    app.pathResult = null;
+    status.textContent = '无法寻路：' + (data.error && data.error.message);
+    status.className = 'hint path-status-err';
+    return;
+  }
+  app.pathResult = data;
+  app.pathSig = planSignature();
+  renderPathResults(data);
+}
+
+function renderPathResults(data) {
+  const status = $('pathStatus');
+  status.className = 'hint';
+  const faceName = data.target.face === 'front' ? '正面' : '反面';
+  if (data.status === 'already') {
+    status.classList.add('path-status-ok');
+    status.textContent = `当前末态已经是格(${data.target.cell}) 的${faceName}朝上封面的单叠，无需追加步骤。`;
+    $('pathResults').hidden = true;
+    return;
+  }
+  if (data.status === 'no_solution') {
+    status.classList.add('path-status-err');
+    status.textContent = '无解：在引擎允许的 8 步折叠内，无法从当前末态收成符合该目标的单叠。';
+    $('pathResults').hidden = true;
+    return;
+  }
+  if (data.status === 'limit') {
+    status.classList.add('path-status-err');
+    status.textContent = '搜索超限：已达到 8 步 / 2 秒上限仍未确认可行方案，可先手动折几步再搜索。';
+    $('pathResults').hidden = true;
+    return;
+  }
+
+  status.classList.add('path-status-ok');
+  status.textContent =
+    `找到 ${data.goalCount || data.schemes.length} 条等长最短方案（各 ${data.length} 步，` +
+    `枚举 ${data.visited} 个状态，耗时 ${data.elapsedMs} ms），封面为格(${data.target.cell}) 的${faceName}朝上。` +
+    (data.truncated ? ` 共 ${data.goalCount} 条，仅展示前 3 条。` : '');
+
+  const box = $('pathResults');
+  box.hidden = false;
+  box.innerHTML = '';
+  data.schemes.forEach((scheme, i) => {
+    const div = document.createElement('div');
+    div.className = 'path-scheme';
+    const head = document.createElement('div');
+    head.className = 'path-scheme-head';
+    const up = scheme.cover.upright ? '正立' : '⟲ 倒置';
+    head.innerHTML = `<b>方案 ${i + 1}</b>（${scheme.steps.length} 步，` +
+      `落于格(${scheme.finalCell})，封面 ${faceName}·${up}）`;
+    const ol = document.createElement('ol');
+    ol.className = 'path-steps';
+    const base = app.plan.steps.length;
+    scheme.steps.forEach((s, j) => {
+      const li = document.createElement('li');
+      const pos = s.axis === 'v' ? `竖线 ${s.line}` : `横线 ${s.line}`;
+      li.textContent = `第 ${base + j + 1} 步：${pos}，${DIR_TEXT_PATH[s.dir]}`;
+      ol.appendChild(li);
+    });
+    const btn = document.createElement('button');
+    btn.className = 'primary path-append';
+    btn.textContent = '追加并回放';
+    btn.addEventListener('click', () => applyPathScheme(scheme));
+    div.append(head, ol, btn);
+    box.appendChild(div);
+  });
+}
+
+/** 将选定方案的步骤追加到当前步骤末尾，并进入既有回放（直接放到最后一步）。 */
+function applyPathScheme(scheme) {
+  if (!app.pathResult || app.pathSig !== planSignature()) {
+    $('pathStatus').textContent = '方案已变动，该寻路结果已失效，请重新搜索。';
+    $('pathStatus').className = 'hint path-status-err';
+    return;
+  }
+  // 追加前以当前末态再校验一次，确保进入回放的都是合法步骤
+  let state = E.replay(app.plan.rows, app.plan.cols, app.plan.labels, app.plan.steps).state;
+  for (const step of scheme.steps) {
+    const err = E.validateFold(state, step);
+    if (err) {
+      showFoldError(err);
+      return;
+    }
+    state = E.applyFold(state, step);
+    app.plan.steps.push({ axis: step.axis, line: step.line, dir: step.dir });
+  }
+  clearFoldError();
+  app.pathResult = null;
+  app.pathSig = null;
+  $('pathResults').hidden = true;
+  $('saveMsg').textContent = `已将寻路方案的 ${scheme.steps.length} 步追加到当前步骤，可逐步回放，记得保存。`;
+  setUpto(app.plan.steps.length, true);
+}
+
 // ---------- 错误提示 ----------
 function showFoldError(err) {
   const box = $('foldError');
@@ -885,6 +1079,7 @@ if (typeof window !== 'undefined') {
   window.__foldApp = Object.assign(app, {
     requestStep, setUpto, createGrid, render, getFoldError: () => $('foldError'),
     previewImposition, confirmImposition, closeImposition, renderImposition,
-    readImposeInputs
+    readImposeInputs,
+    searchPath, applyPathScheme, renderPath, pathEligibility, refreshPathCells
   });
 }

@@ -107,6 +107,27 @@
         </div>
       </section>
 
+      <section class="card" id="pathCard">
+        <h2>折手自动寻路</h2>
+        <p class="hint">从当前方案<b>已合法回放的末态</b>出发，搜索把纸收成单叠、
+          并让指定原始纸格的正面/反面朝上成为封面的<b>最短</b>后续折法。
+          仅支持不超过 4×4 的网格，上限 8 步 / 2 秒。</p>
+        <div class="row">
+          <label>封面纸格
+            <select id="pathCell"></select>
+          </label>
+          <label>朝上面
+            <select id="pathFace">
+              <option value="front">正面朝上</option>
+              <option value="back">反面朝上</option>
+            </select>
+          </label>
+          <button id="pathSearchBtn" class="primary">搜索最短折法</button>
+        </div>
+        <div id="pathStatus" class="hint"></div>
+        <div id="pathResults" class="path-results" hidden></div>
+      </section>
+
       <section class="card">
         <h2>页码朝向</h2>
         <div id="orientInfo" class="hint">在画布里，倒排页码会旋转 180° 显示，并标注 <span class="inv">⟲倒</span>。</div>
@@ -168,6 +189,7 @@
   </div>
 
   <script src="foldEngine.js"></script>
+  <script src="foldPath.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
